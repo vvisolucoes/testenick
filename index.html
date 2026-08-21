@@ -6,6 +6,7 @@
   <title>Nicolaus English Platform</title>
   <style>
 
+
 @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -178,6 +179,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
 .mb-0 { margin-bottom: 0 !important; }
 
   
+  
   </style>
 </head>
 <body>
@@ -215,6 +217,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
 
   <!-- Lógica da aplicação -->
   <script>
+
 
 /* ============================================================================
  * Nicolaus English Platform — app.js
@@ -645,7 +648,9 @@ function renderProfessorLoginForm() {
     <div class="field"><span class="field-label">E-mail</span><input id="login-email" type="email" class="input" /></div>
     <div class="field"><span class="field-label">Senha</span><input id="login-pw" type="password" class="input" data-enter-action="submit-professor-login" /></div>
     ${state.formError ? `<p class="error-text">⚠ ${esc(state.formError)}</p>` : ""}
+    ${state.formNotice ? `<p style="font-size:12.5px;color:var(--sage);margin:-6px 0 12px">✓ ${esc(state.formNotice)}</p>` : ""}
     <button class="btn gold" data-action="submit-professor-login" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
+    <button type="button" class="icon-btn" style="font-size:12.5px;margin-top:12px" data-action="professor-forgot-password">Esqueci minha senha</button>
   `;
 }
 
@@ -663,7 +668,9 @@ function renderStudentLogin() {
         </div>
         <div class="field"><span class="field-label">Senha</span><input id="student-pw" type="password" class="input" autofocus data-enter-action="submit-student-login" /></div>
         ${state.formError ? `<p class="error-text">⚠ ${esc(state.formError)}</p>` : ""}
+        ${state.formNotice ? `<p style="font-size:12.5px;color:var(--sage);margin:-6px 0 12px">✓ ${esc(state.formNotice)}</p>` : ""}
         <button class="btn gold" data-action="submit-student-login" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
+        <button type="button" class="icon-btn" style="font-size:12.5px;margin-top:12px" data-action="student-forgot-password" data-email="${esc(s.email || "")}">Esqueci minha senha</button>
       </div>
     </div>`;
   }
@@ -697,8 +704,8 @@ function renderStudentForceChange() {
 
 /* ============================== ACTIONS ============================== */
 const actions = {
-  "go-professor": () => { state.formError = ""; state.view = state.metaSetupComplete ? "professor-login" : "professor-setup"; render(); },
-  "go-student": () => { state.formError = ""; state.pickedLoginStudent = null; state.loginSearch = ""; state.view = "student-login"; render(); },
+  "go-professor": () => { state.formError = ""; state.formNotice = ""; state.view = state.metaSetupComplete ? "professor-login" : "professor-setup"; render(); },
+  "go-student": () => { state.formError = ""; state.formNotice = ""; state.pickedLoginStudent = null; state.loginSearch = ""; state.view = "student-login"; render(); },
   "go-landing": () => { state.formError = ""; state.view = "landing"; render(); },
 
   "submit-professor-setup": async () => {
@@ -733,7 +740,7 @@ const actions = {
   "submit-professor-login": async () => {
     const email = document.getElementById("login-email").value.trim();
     const pw = document.getElementById("login-pw").value;
-    state.formError = "";
+    state.formError = ""; state.formNotice = "";
     if (!email || !pw) { state.formError = "Preencha e-mail e senha."; render(); return; }
     state.busy = true; render();
     try {
@@ -744,20 +751,47 @@ const actions = {
       render();
     }
   },
+  "professor-forgot-password": async () => {
+    const email = document.getElementById("login-email").value.trim();
+    state.formError = ""; state.formNotice = "";
+    if (!email) { state.formError = "Digite seu e-mail acima primeiro, depois clique em “Esqueci minha senha”."; render(); return; }
+    state.busy = true; render();
+    try {
+      await auth.sendPasswordResetEmail(email);
+      state.formNotice = `Enviamos um link de redefinição para ${email}.`;
+    } catch (err) {
+      state.formError = friendlyAuthError(err);
+    }
+    state.busy = false;
+    render();
+  },
+  "student-forgot-password": async (ds) => {
+    state.formError = ""; state.formNotice = "";
+    if (!ds.email) { state.formError = "Este aluno não tem e-mail cadastrado. Fale com seu professor."; render(); return; }
+    state.busy = true; render();
+    try {
+      await auth.sendPasswordResetEmail(ds.email);
+      state.formNotice = `Enviamos um link de redefinição para ${ds.email}.`;
+    } catch (err) {
+      state.formError = friendlyAuthError(err);
+    }
+    state.busy = false;
+    render();
+  },
 
   "filter-students": (ds, e) => { /* handled via input listener below */ },
 
   "pick-student": (ds) => {
     state.pickedLoginStudent = state.directory.find((s) => s.id === ds.id) || null;
-    state.formError = "";
+    state.formError = ""; state.formNotice = "";
     render();
   },
-  "student-login-back": () => { state.pickedLoginStudent = null; state.formError = ""; render(); },
+  "student-login-back": () => { state.pickedLoginStudent = null; state.formError = ""; state.formNotice = ""; render(); },
 
   "submit-student-login": async () => {
     const pw = document.getElementById("student-pw").value;
     const picked = state.pickedLoginStudent;
-    state.formError = "";
+    state.formError = ""; state.formNotice = "";
     if (!picked || !picked.email) { state.formError = "Este aluno ainda não tem acesso configurado. Fale com seu professor."; render(); return; }
     if (!pw) { state.formError = "Digite sua senha."; render(); return; }
     state.busy = true; render();
@@ -1817,6 +1851,7 @@ function renderChart(canvas) {
 
 init();
 
+  
   
   </script>
 </body>
