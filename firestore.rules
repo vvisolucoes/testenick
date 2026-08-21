@@ -1,13 +1,15 @@
 rules_version = '2';
 
 // ============================================================================
-// Nicolaus English Platform — Firestore Security Rules
+// Nicolaus English Platform — Firestore Security Rules (versão Spark/gratuita)
 //
-// Papéis (roles) são definidos via CUSTOM CLAIMS no token de autenticação
-// (request.auth.token.role), nunca em um documento do Firestore — assim um
-// aluno não tem como "virar professor" editando seus próprios dados, porque
-// claims só podem ser escritas pelo Admin SDK (ou seja, pelas Cloud Functions
-// em functions/index.js, nunca pelo cliente).
+// Sem custom claims (não usamos Cloud Functions/Admin SDK nesta versão).
+// O papel "professor" é determinado consultando config/meta.professorUid —
+// só existe UM professor, e o documento config/meta só pode ser criado uma
+// única vez (a regra de "create" abaixo bloqueia qualquer criação seguinte).
+// Um aluno nunca consegue "virar professor": não há campo de papel para
+// editar em seu próprio documento, o papel vem inteiramente de quem é dono
+// do uid gravado em config/meta.
 // ============================================================================
 
 service cloud.firestore {
@@ -17,92 +19,97 @@ service cloud.firestore {
       return request.auth != null;
     }
     function isProfessor() {
-      return isSignedIn() && request.auth.token.role == 'professor';
-    }
-    function isStudent() {
-      return isSignedIn() && request.auth.token.role == 'student';
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/config/meta)
+        && get(/databases/$(database)/documents/config/meta).data.professorUid == request.auth.uid;
     }
     function isSelf(studentId) {
       return isSignedIn() && request.auth.uid == studentId;
     }
 
     // ------------------------------------------------------------------
-    // config/meta — flag de setup inicial (existe/não existe professor).
-    // Leitura pública é necessária pois a tela de login precisa decidir,
-    // ANTES de qualquer autenticação, se mostra "criar conta do professor"
-    // ou a tela normal de login. Não guarda nada sensível (só um uid).
-    // Escrita só acontece via Cloud Function (bootstrapProfessor).
+    // config/meta — guarda o uid do professor. Leitura pública (a tela
+    // inicial precisa saber, ANTES de qualquer login, se já existe um
+    // professor configurado ou se deve mostrar a tela de criação de
+    // conta). Só pode ser CRIADO uma vez — a condição "!exists(...)"
+    // garante que ninguém consiga criar um segundo professor depois.
+    // Nunca pode ser alterado ou apagado por ninguém pelo app.
     // ------------------------------------------------------------------
     match /config/meta {
       allow read: if true;
-      allow write: if false;
+      allow create: if isSignedIn()
+        && !exists(/databases/$(database)/documents/config/meta)
+        && request.resource.data.professorUid == request.auth.uid;
+      allow update, delete: if false;
     }
 
     // ------------------------------------------------------------------
-    // directory/{studentId} — espelho público mínimo (somente "name")
-    // usado exclusivamente para popular a lista "quem é você?" na tela
-    // de login do aluno, sem expor nível, notas, pagamentos etc.
-    // Mantido em sincronia automaticamente pela Cloud Function
-    // syncStudentDirectory sempre que students/{uid} muda.
+    // directory/{studentId} — espelho público mínimo (name, level, email)
+    // usado só para a tela "quem é você?" no login do aluno. O professor
+    // mantém isso em sincronia manualmente (no mesmo lote de escrita que
+    // atualiza students/{uid}) — não há mais uma Cloud Function fazendo
+    // isso automaticamente.
     // ------------------------------------------------------------------
     match /directory/{studentId} {
       allow read: if true;
-      allow write: if false;
+      allow write: if isProfessor();
     }
 
     // ------------------------------------------------------------------
-    // students/{studentId} — perfil completo do aluno (nível, histórico
-    // de testes, contato, status). Criação e exclusão só via Cloud
-    // Function (Admin SDK), pois envolvem também a conta no Firebase Auth.
-    // O próprio aluno pode alterar o próprio documento (ex: resultado do
-    // teste de nivelamento, flag de troca de senha obrigatória) — o pior
-    // cenário de abuso é o aluno inflar o próprio nível, o que o professor
-    // sempre pode ver e corrigir; não é uma falha de privacidade entre
-    // alunos, já que cada um só enxerga e só escreve o próprio documento.
+    // students/{studentId} — perfil do aluno. O professor cria e apaga
+    // (a conta no Firebase Auth é criada do lado do cliente, com uma
+    // instância secundária do app, então o Firestore só precisa
+    // confirmar que quem está escrevendo é o professor). O próprio
+    // aluno pode atualizar seu documento (resultado de teste de
+    // nivelamento, flag de troca de senha) — o pior cenário de abuso é
+    // inflar o próprio nível, sempre visível e corrigível pelo professor.
     // ------------------------------------------------------------------
     match /students/{studentId} {
       allow read: if isProfessor() || isSelf(studentId);
+      allow create: if isProfessor();
       allow update: if isProfessor() || isSelf(studentId);
-      allow create, delete: if false;
+      allow delete: if isProfessor();
     }
 
     // ------------------------------------------------------------------
-    // classes/{classId} — agenda de aulas. Só o professor cria/edita/
-    // remove. O aluno só lê as próprias aulas.
+    // classes/{classId} — agenda de aulas. Só o professor escreve. Aluno
+    // só lê as próprias aulas.
     // ------------------------------------------------------------------
     match /classes/{classId} {
-      allow read: if isProfessor() || (isStudent() && resource.data.studentId == request.auth.uid);
+      allow read: if isProfessor() || (isSignedIn() && resource.data.studentId == request.auth.uid);
       allow create, update, delete: if isProfessor();
     }
 
     // ------------------------------------------------------------------
-    // payments/{paymentId} — financeiro. Só o professor escreve. O aluno
-    // pode ler os próprios pagamentos (transparência), nunca os de outros.
+    // payments/{paymentId} — financeiro. Só o professor escreve. Aluno
+    // só lê os próprios pagamentos.
     // ------------------------------------------------------------------
     match /payments/{paymentId} {
-      allow read: if isProfessor() || (isStudent() && resource.data.studentId == request.auth.uid);
+      allow read: if isProfessor() || (isSignedIn() && resource.data.studentId == request.auth.uid);
       allow create, update, delete: if isProfessor();
     }
 
     // ------------------------------------------------------------------
     // assignments/{assignmentId} — exercícios atribuídos + prática livre.
-    // Professor tem controle total. Aluno só enxerga as próprias
-    // atividades; pode criar registros de prática livre para si mesmo
-    // (assignedBy == 'aluno') e só pode concluir (nunca reabrir ou alterar
-    // resultado de) uma atividade pendente que seja sua.
+    // Professor tem controle total (inclusive corrigir redações
+    // manualmente, mudando status de "aguardando_correcao" para
+    // "concluida"). Aluno só enxerga as próprias atividades; pode criar
+    // registros de prática livre para si mesmo, e só pode completar
+    // (nunca reabrir ou alterar o resultado de) uma atividade pendente
+    // que seja sua.
     // ------------------------------------------------------------------
     match /assignments/{assignmentId} {
-      allow read: if isProfessor() || (isStudent() && resource.data.studentId == request.auth.uid);
+      allow read: if isProfessor() || (isSignedIn() && resource.data.studentId == request.auth.uid);
       allow create: if isProfessor()
-        || (isStudent()
+        || (isSignedIn()
             && request.resource.data.studentId == request.auth.uid
             && request.resource.data.assignedBy == 'aluno'
-            && request.resource.data.status == 'concluida');
+            && (request.resource.data.status == 'concluida' || request.resource.data.status == 'aguardando_correcao'));
       allow update: if isProfessor()
-        || (isStudent()
+        || (isSignedIn()
             && resource.data.studentId == request.auth.uid
             && resource.data.status == 'pendente'
-            && request.resource.data.status == 'concluida');
+            && (request.resource.data.status == 'concluida' || request.resource.data.status == 'aguardando_correcao'));
       allow delete: if isProfessor();
     }
   }
