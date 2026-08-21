@@ -8,6 +8,7 @@
 
 
 
+
 @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -182,6 +183,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
   
   
   
+  
   </style>
 </head>
 <body>
@@ -189,19 +191,12 @@ textarea.input { resize: vertical; line-height: 1.6; }
     <div class="center-screen"><span class="mono small-muted">CARREGANDO…</span></div>
   </div>
 
-  <!-- Firebase (compat SDK — sem necessidade de bundler). Só Auth + Firestore:
-       esta versão roda inteira no plano gratuito (Spark), sem Cloud Functions. -->
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
-
-  <!-- Gráficos -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 
   <script>
-  // ============================================================================
-  // CONFIG — configuração do projeto Firebase.
-  // ============================================================================
   const firebaseConfig = {
     apiKey: "AIzaSyAzEIe2NupZUn45JYjbof5pUmnO_NmldfE",
     authDomain: "nicolaus-english-platform.firebaseapp.com",
@@ -212,8 +207,8 @@ textarea.input { resize: vertical; line-height: 1.6; }
   };
   </script>
 
-  <!-- Lógica da aplicação -->
   <script>
+
 
 
 
@@ -924,6 +919,7 @@ const actions = {
     } catch (err) {
       state.busy = false;
       state.formError = friendlyAuthError(err);
+      alert("ERRO AO SALVAR ALUNO:\ncódigo: " + (err.code || "(sem código)") + "\nmensagem: " + (err.message || String(err)));
       render();
     }
   },
@@ -1849,6 +1845,7 @@ function renderChart(canvas) {
 
 init();
 
+  
   
   
   
