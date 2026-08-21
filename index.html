@@ -10,6 +10,7 @@
 
 
 
+
 @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -186,6 +187,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
   
   
   
+  
   </style>
 </head>
 <body>
@@ -210,6 +212,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
   </script>
 
   <script>
+
 
 
 
@@ -501,8 +504,7 @@ document.getElementById("app").addEventListener("click", async (e) => {
   if (!target) return;
   const action = target.dataset.action;
   const fn = actions[action];
-  if (fn) { try { await fn(target.dataset, e); } catch (err) { console.error(err); alert("ERRO NÃO TRATADO: " + (err && err.message || err)); } }
-  else { alert("DEBUG: ação '" + action + "' não encontrada no objeto actions."); }
+  if (fn) { try { await fn(target.dataset, e); } catch (err) { console.error(err); } }
 });
 document.getElementById("app").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.matches("input[data-enter-action]")) {
@@ -888,7 +890,6 @@ const actions = {
 
   /* ---------- Student CRUD (professor) — 100% client-side, sem Cloud Functions ---------- */
   "submit-student-form": async () => {
-    alert("DEBUG: cliquei em Salvar aluno, entrando na função.");
     const id = state.modal.id;
     const isNew = !id;
     const name = document.getElementById("st-name").value.trim();
@@ -924,7 +925,6 @@ const actions = {
     } catch (err) {
       state.busy = false;
       state.formError = friendlyAuthError(err);
-      alert("ERRO AO SALVAR ALUNO:\ncódigo: " + (err.code || "(sem código)") + "\nmensagem: " + (err.message || String(err)));
       render();
     }
   },
@@ -1325,8 +1325,8 @@ function renderAdminAlunos() {
         </div>
         ${pend > 0 ? `<div style="margin-top:10px">${pillHTML(`${pend} tarefa${pend > 1 ? "s" : ""} pendente${pend > 1 ? "s" : ""}`, "var(--brick)")}</div>` : ""}
         <div style="display:flex;justify-content:flex-end;gap:4px;margin-top:12px">
-          <button class="icon-btn" data-action="open-modal" data-type="student" data-id="${s.id}" onclick="event.stopPropagation()">✎</button>
-          <button class="icon-btn danger" data-action="delete-student" data-id="${s.id}" onclick="event.stopPropagation()">🗑</button>
+          <button class="icon-btn" data-action="open-modal" data-type="student" data-id="${s.id}">✎</button>
+          <button class="icon-btn danger" data-action="delete-student" data-id="${s.id}">🗑</button>
         </div>
       </div>`;
     }).join("")}</div>` : emptyState("Nenhum aluno encontrado", "Cadastre um aluno para começar a acompanhar o progresso.")}`;
@@ -1447,8 +1447,8 @@ function renderModal() {
   else if (m.type === "assignmentDetail") { title = "Detalhes da atividade"; body = assignmentDetailBody(); wide = true; }
 
   return `
-  <div class="modal-overlay" data-action="close-modal-overlay" onclick="if(event.target===this) document.querySelector('[data-action=close-modal]')?.click()">
-    <div class="modal ${wide ? "wide" : ""}" onclick="event.stopPropagation()">
+  <div class="modal-overlay" onclick="if(event.target===this) document.querySelector('[data-action=close-modal]')?.click()">
+    <div class="modal ${wide ? "wide" : ""}">
       <div class="modal-head"><h3 class="serif">${esc(title)}</h3><button class="modal-close" data-action="close-modal">✕</button></div>
       ${body}
     </div>
@@ -1850,6 +1850,7 @@ function renderChart(canvas) {
 
 init();
 
+  
   
   
   
