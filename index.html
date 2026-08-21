@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nicolaus English Platform</title>
   <style>
+
 @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -176,6 +177,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
 .small-muted { font-size: 12.5px; color: var(--slate); }
 .mb-0 { margin-bottom: 0 !important; }
 
+  
   </style>
 </head>
 <body>
@@ -183,11 +185,11 @@ textarea.input { resize: vertical; line-height: 1.6; }
     <div class="center-screen"><span class="mono small-muted">CARREGANDO…</span></div>
   </div>
 
-  <!-- Firebase (compat SDK — sem necessidade de bundler) -->
+  <!-- Firebase (compat SDK — sem necessidade de bundler). Só Auth + Firestore:
+       esta versão roda inteira no plano gratuito (Spark), sem Cloud Functions. -->
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-functions-compat.js"></script>
 
   <!-- Gráficos -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -198,8 +200,8 @@ textarea.input { resize: vertical; line-height: 1.6; }
   // Firebase Console → Configurações do projeto → Geral → "Seus apps" → SDK setup.
   // Esses valores NÃO são segredos (diferente de uma API key de servidor) — só
   // identificam o projeto para o navegador. A segurança de verdade está nas
-  // Firestore Security Rules (firestore.rules) e nas Cloud Functions, não em
-  // esconder isto. Pode ficar público no repositório.
+  // Firestore Security Rules (firestore.rules), não em esconder isto. Pode
+  // ficar público no repositório.
   // ============================================================================
   const firebaseConfig = {
     apiKey: "COLE_AQUI",
@@ -213,6 +215,7 @@ textarea.input { resize: vertical; line-height: 1.6; }
 
   <!-- Lógica da aplicação -->
   <script>
+
 /* ============================================================================
  * Nicolaus English Platform — app.js
  * Front-end vanilla JS (sem framework/build step) + Firebase (Auth + Firestore
@@ -224,7 +227,6 @@ textarea.input { resize: vertical; line-height: 1.6; }
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
-const functions = firebase.functions();
 
 /* ============================== CONSTANTES ============================== */
 const LEVELS_ORDER = ["A1", "A2", "B1", "B2", "C1", "C2"];
@@ -245,6 +247,7 @@ const STATUS_META = {
   falta: { label: "Falta", tone: "var(--brick)" },
   pago: { label: "Pago", tone: "var(--sage)" },
   pendente: { label: "Pendente", tone: "var(--gold)" },
+  aguardando_correcao: { label: "Aguardando correção", tone: "var(--gold)" },
   atrasado: { label: "Atrasado", tone: "var(--brick)" },
   ativo: { label: "Ativo", tone: "var(--sage)" },
   inativo: { label: "Inativo", tone: "var(--slate)" },
@@ -536,17 +539,33 @@ async function handleAuthChange(user) {
     return;
   }
   state.authUser = user;
-  const tokenResult = await user.getIdTokenResult();
-  state.role = tokenResult.claims.role || null;
-  if (state.role === "professor") {
+  const metaSnap = await db.collection("config").doc("meta").get();
+  state.metaSetupComplete = metaSnap.exists;
+
+  if (metaSnap.exists && metaSnap.data().professorUid === user.uid) {
+    state.role = "professor";
     await loadAdminData();
     state.view = "admin";
-  } else if (state.role === "student") {
-    await loadStudentData(user.uid);
-    state.view = state.studentProfile && state.studentProfile.mustChangePassword ? "student-forceChange" : "student";
-  } else {
-    state.view = "landing";
+    render();
+    return;
   }
+
+  const studentDoc = await db.collection("students").doc(user.uid).get();
+  if (studentDoc.exists) {
+    state.role = "student";
+    state.studentProfile = { id: studentDoc.id, ...studentDoc.data() };
+    await loadStudentData(user.uid);
+    state.view = state.studentProfile.mustChangePassword ? "student-forceChange" : "student";
+    render();
+    return;
+  }
+
+  // Conta autenticada mas sem professor nem aluno correspondente no Firestore
+  // (ex: aluno removido pelo professor) — desloga por segurança.
+  state.role = null;
+  state.formError = "Sua conta não está mais ativa. Fale com seu professor.";
+  await auth.signOut();
+  state.view = "landing";
   render();
 }
 
@@ -694,8 +713,11 @@ const actions = {
     suppressAuthListener = true;
     try {
       const cred = await auth.createUserWithEmailAndPassword(email, pw);
-      await functions.httpsCallable("bootstrapProfessor")();
-      await cred.user.getIdToken(true);
+      // Protegido pela regra do firestore.rules: só cria se config/meta ainda não existir.
+      await db.collection("config").doc("meta").set({
+        professorUid: cred.user.uid,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
       state.metaSetupComplete = true;
       state.busy = false;
       await handleAuthChange(cred.user);
@@ -833,8 +855,7 @@ const actions = {
     }
   },
 
-  /* ---------- Student CRUD (professor) ---------- */
-  "toggle-reset-pw": () => { state.modal.showResetPw = true; render(); },
+  /* ---------- Student CRUD (professor) — 100% client-side, sem Cloud Functions ---------- */
   "submit-student-form": async () => {
     const id = state.modal.id;
     const isNew = !id;
@@ -845,10 +866,10 @@ const actions = {
     const status = document.getElementById("st-status").value;
     state.formError = "";
     if (!name) { state.formError = "Informe o nome do aluno."; render(); return; }
+    if (isNew && !/^\S+@\S+\.\S+$/.test(email)) { state.formError = "Informe um e-mail válido para o aluno (necessário para o login e para redefinição de senha)."; render(); return; }
 
-    const needsPw = isNew || state.modal.showResetPw;
     let pw = "", confirm = "";
-    if (needsPw) {
+    if (isNew) {
       pw = document.getElementById("st-pw").value;
       confirm = document.getElementById("st-pw-confirm").value;
       if (pw.length < MIN_PW) { state.formError = `A senha precisa ter pelo menos ${MIN_PW} caracteres.`; render(); return; }
@@ -858,27 +879,46 @@ const actions = {
     state.busy = true; render();
     try {
       if (isNew) {
-        await functions.httpsCallable("createStudent")({ name, email, password: pw });
+        await createStudentAccount(name, email, pw);
       } else {
-        if (state.modal.showResetPw) {
-          await functions.httpsCallable("resetStudentPassword")({ studentUid: id, newPassword: pw });
-        }
-        await db.collection("students").doc(id).update({ name, phone, level, status });
+        const batch = db.batch();
+        batch.update(db.collection("students").doc(id), { name, phone, level, status });
+        batch.update(db.collection("directory").doc(id), { name, level });
+        await batch.commit();
       }
       await loadAdminData();
       state.busy = false; state.modal = null;
       render();
     } catch (err) {
       state.busy = false;
-      state.formError = err.message || "Não foi possível salvar.";
+      state.formError = friendlyAuthError(err);
       render();
     }
   },
+  "send-password-reset": async (ds) => {
+    const s = studentOf(ds.id);
+    if (!s || !s.email) { alert("Este aluno não tem e-mail cadastrado."); return; }
+    try {
+      await auth.sendPasswordResetEmail(s.email);
+      alert(`E-mail de redefinição de senha enviado para ${s.email}.`);
+    } catch (err) { alert("Não foi possível enviar: " + friendlyAuthError(err)); }
+  },
   "delete-student": async (ds) => {
-    if (!confirm("Remover este aluno e todos os seus dados (aulas, pagamentos, atividades)? Essa ação não pode ser desfeita.")) return;
+    if (!confirm("Remover este aluno e todos os seus dados (aulas, pagamentos, atividades)? Essa ação não pode ser desfeita. O login dele deixará de funcionar.")) return;
     state.busy = true; render();
     try {
-      await functions.httpsCallable("deleteStudent")({ studentUid: ds.id });
+      const batch = db.batch();
+      batch.delete(db.collection("students").doc(ds.id));
+      batch.delete(db.collection("directory").doc(ds.id));
+      const [classesSnap, paymentsSnap, assignmentsSnap] = await Promise.all([
+        db.collection("classes").where("studentId", "==", ds.id).get(),
+        db.collection("payments").where("studentId", "==", ds.id).get(),
+        db.collection("assignments").where("studentId", "==", ds.id).get(),
+      ]);
+      classesSnap.forEach((d) => batch.delete(d.ref));
+      paymentsSnap.forEach((d) => batch.delete(d.ref));
+      assignmentsSnap.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
       state.detailStudentId = null;
       await loadAdminData();
     } catch (err) { alert("Não foi possível remover: " + err.message); }
@@ -994,30 +1034,19 @@ const actions = {
     render();
   },
 
-  /* Writing */
+  /* Writing — sem IA: envia para o professor revisar manualmente */
   "writing-submit": async () => {
     const ex = state.activeExercise;
     const text = document.getElementById("writing-text").value;
     if (!text.trim()) return;
-    ex.writingStatus = "grading";
-    ex.writingText = text;
+    state.busy = true;
     render();
-    try {
-      const result = await functions.httpsCallable("gradeWriting")({ lessonLevel: ex.lesson.level, lessonPrompt: ex.lesson.prompt, text });
-      ex.outcome = result.data;
-      ex.writingStatus = "done";
-      render();
-    } catch (err) {
-      ex.writingStatus = "error";
-      render();
-    }
-  },
-  "writing-finish": async () => {
-    const ex = state.activeExercise;
-    await completeExercise(ex.lesson, { score: ex.outcome.score, resultLevel: ex.outcome.level, feedback: ex.outcome.feedback, responseText: ex.writingText }, ex.assignmentId);
-    state.activeExercise = null;
+    await submitWritingForReview(ex.lesson, text, ex.assignmentId);
+    state.busy = false;
+    ex.writingStatus = "sent";
     render();
   },
+  "writing-done": () => { state.activeExercise = null; render(); },
 
   /* Placement test */
   "start-placement-test": () => { state.placementTest = { qIndex: 0, answers: {} }; state.lastPlacementResult = null; render(); },
@@ -1056,6 +1085,34 @@ function restoreFocus(id) {
   if (el) { el.focus(); const v = el.value; el.value = ""; el.value = v; }
 }
 
+/**
+ * Cria a conta de um aluno no Firebase Auth SEM deslogar o professor.
+ * Técnica: inicializa uma segunda instância nomeada do app Firebase,
+ * cria o usuário ali (isso "loga" só dentro dessa instância secundária,
+ * nunca na instância principal onde o professor está autenticado),
+ * desloga e destrói a instância secundária em seguida. 100% client-side,
+ * funciona no plano gratuito (Spark) — não precisa de Admin SDK/servidor.
+ */
+async function createStudentAccount(name, email, password) {
+  const secondaryApp = firebase.initializeApp(firebaseConfig, "secondary-" + Date.now());
+  try {
+    const secondaryAuth = secondaryApp.auth();
+    const cred = await secondaryAuth.createUserWithEmailAndPassword(email, password);
+    const uid = cred.user.uid;
+    await secondaryAuth.signOut();
+    const batch = db.batch();
+    batch.set(db.collection("students").doc(uid), {
+      name, email, phone: "", level: "", status: "ativo", testHistory: [],
+      mustChangePassword: true, createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    batch.set(db.collection("directory").doc(uid), { name, level: "", email });
+    await batch.commit();
+    return uid;
+  } finally {
+    await secondaryApp.delete();
+  }
+}
+
 function friendlyAuthError(err) {
   const map = {
     "auth/wrong-password": "Senha incorreta.",
@@ -1082,6 +1139,29 @@ async function completeExercise(lesson, outcome, assignmentId) {
       assignedBy: "aluno", assignedDate: todayISO(), dueDate: null,
       status: "concluida", completedAt: todayISO(),
       score: outcome.score, resultLevel: outcome.resultLevel, feedback: outcome.feedback || "", responseText: outcome.responseText || "",
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+  await loadStudentData(uid);
+}
+
+/**
+ * Fluxo de redação sem IA: o aluno envia o texto e a atividade fica com
+ * status "aguardando_correcao" até o professor ler e avaliar manualmente
+ * (em Atividades → abrir a atividade → preencher nível/pontuação/feedback).
+ */
+async function submitWritingForReview(lesson, text, assignmentId) {
+  const uid = state.authUser.uid;
+  if (assignmentId) {
+    await db.collection("assignments").doc(assignmentId).update({
+      status: "aguardando_correcao", submittedAt: todayISO(), responseText: text,
+    });
+  } else {
+    await db.collection("assignments").add({
+      studentId: uid, lessonId: lesson.id, lessonTitle: lesson.title, lessonType: lesson.type, lessonLevel: lesson.level,
+      assignedBy: "aluno", assignedDate: todayISO(), dueDate: null,
+      status: "aguardando_correcao", submittedAt: todayISO(),
+      score: null, resultLevel: null, feedback: "", responseText: text,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
   }
@@ -1135,9 +1215,10 @@ function renderAdminOverview() {
   const pending = state.payments.filter((p) => p.status !== "pago").reduce((a, p) => a + Number(p.amount || 0), 0);
   const weekClasses = state.classes.filter((c) => { const d = new Date(c.date + "T00:00:00"); return d >= startOfWeek && d < endOfWeek; }).length;
   const pendingTasks = state.assignments.filter((a) => a.status === "pendente").length;
+  const awaitingReview = state.assignments.filter((a) => a.status === "aguardando_correcao").length;
 
   const recentClasses = [...state.classes].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
-  const recentAssignments = [...state.assignments].sort((a, b) => (b.completedAt || b.assignedDate || "").localeCompare(a.completedAt || a.assignedDate || "")).slice(0, 5);
+  const recentAssignments = [...state.assignments].sort((a, b) => (b.completedAt || b.submittedAt || b.assignedDate || "").localeCompare(a.completedAt || a.submittedAt || a.assignedDate || "")).slice(0, 5);
 
   return `
     <div class="page-header"><div><h2 class="serif">Painel</h2><p>Visão geral da sua operação de ensino</p></div></div>
@@ -1147,6 +1228,7 @@ function renderAdminOverview() {
       ${kpiCard("Pendências", fmtBRL(pending), pending > 0 ? "var(--brick)" : "var(--sage)")}
       ${kpiCard("Aulas esta semana", weekClasses, "var(--gold)")}
       ${kpiCard("Tarefas pendentes", pendingTasks, pendingTasks > 0 ? "var(--brick)" : "var(--sage)")}
+      ${kpiCard("Redações p/ corrigir", awaitingReview, awaitingReview > 0 ? "var(--brick)" : "var(--sage)")}
     </div>
     <div class="two-col">
       ${panel("Últimas aulas", recentClasses.length ? recentClasses.map((c) => rowHTML(studentNameOf(c.studentId), fmtDate(c.date), statusPill(c.status))).join("") : emptyState("Nenhuma aula ainda", "Agende a primeira aula na aba Aulas."))}
@@ -1271,7 +1353,7 @@ function renderAdminAtividades() {
       <button class="btn" data-action="open-modal" data-type="assignment">+ Atribuir exercício</button></div>
     <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
       <div style="display:flex;gap:6px">
-        ${["todas", "pendente", "concluida"].map((f) => `<button class="chip ${statusFilter === f ? "active" : ""}" data-action="set-assign-status-filter" data-f="${f}">${f === "todas" ? "Todas" : STATUS_META[f].label}</button>`).join("")}
+        ${["todas", "pendente", "aguardando_correcao", "concluida"].map((f) => `<button class="chip ${statusFilter === f ? "active" : ""}" data-action="set-assign-status-filter" data-f="${f}">${f === "todas" ? "Todas" : STATUS_META[f].label}</button>`).join("")}
       </div>
       <select id="assign-student-filter" class="input" style="width:auto" data-action-onchange="set-assign-student-filter">
         <option value="todos">Todos os alunos</option>
@@ -1361,10 +1443,9 @@ function studentFormBody() {
   const m = state.modal;
   const isNew = !m.id;
   const s = isNew ? {} : studentOf(m.id) || {};
-  const needsPw = isNew || m.showResetPw;
   return `
     <div class="field"><span class="field-label">Nome</span><input id="st-name" class="input" value="${esc(s.name || "")}" /></div>
-    <div class="field"><span class="field-label">E-mail ${isNew ? "(opcional — deixe em branco para gerar um login automático)" : ""}</span><input id="st-email" class="input" value="${esc(s.email || "")}" ${isNew ? "" : "disabled"} /></div>
+    <div class="field"><span class="field-label">E-mail ${isNew ? "(obrigatório — usado para login e redefinição de senha)" : ""}</span><input id="st-email" type="email" class="input" value="${esc(s.email || "")}" ${isNew ? "" : "disabled"} /></div>
     <div class="field"><span class="field-label">Telefone</span><input id="st-phone" class="input" value="${esc(s.phone || "")}" /></div>
     <div class="field"><span class="field-label">Nível (CEFR)</span>
       <select id="st-level" class="input">
@@ -1378,15 +1459,15 @@ function studentFormBody() {
       </select></div>
     <div style="border-top:1px solid var(--paper-dark);padding-top:14px;margin-top:4px;margin-bottom:14px">
       <span class="field-label">Acesso do aluno</span>
-      ${!isNew && !m.showResetPw ? `
-        <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:13px;color:var(--slate)">${s.email ? "Senha já definida." : "Nenhuma senha definida."}</span>
-          <button class="btn small ghost" data-action="toggle-reset-pw">Redefinir senha</button>
-        </div>` : ""}
-      ${needsPw ? `
-        <div class="field"><span class="field-label">${isNew ? "Senha inicial" : "Nova senha"}</span><input id="st-pw" type="password" class="input" placeholder="Mínimo ${MIN_PW} caracteres" /></div>
+      ${!isNew ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <span style="font-size:13px;color:var(--slate)">Login: ${esc(s.email || "—")}</span>
+          <button class="btn small ghost" data-action="send-password-reset" data-id="${m.id}" type="button">Enviar redefinição por e-mail</button>
+        </div>
+        <p class="hint-text">O aluno recebe um e-mail do Firebase com um link para criar uma nova senha.</p>` : `
+        <div class="field"><span class="field-label">Senha inicial</span><input id="st-pw" type="password" class="input" placeholder="Mínimo ${MIN_PW} caracteres" /></div>
         <div class="field"><span class="field-label">Confirmar senha</span><input id="st-pw-confirm" type="password" class="input" /></div>
-        <p class="hint-text">O aluno será solicitado a trocar essa senha no primeiro acesso.</p>` : ""}
+        <p class="hint-text">O aluno será solicitado a trocar essa senha no primeiro acesso.</p>`}
     </div>
     ${state.formError ? `<p class="error-text">⚠ ${esc(state.formError)}</p>` : ""}
     <button class="btn" data-action="submit-student-form" ${state.busy ? "disabled" : ""}>${state.busy ? "Salvando…" : "Salvar aluno"}</button>`;
@@ -1463,15 +1544,45 @@ function assignmentDetailBody() {
     html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--paper-dark)">
       <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">${stampHTML(a.resultLevel, "md")}
         <div><div style="font-weight:600;font-size:15px">Nível atingido: ${esc(a.resultLevel)}</div>
-        <div class="mono" style="font-size:12px;color:var(--slate)">Pontuação: ${a.score}${a.lessonType === "escrita" ? "/100" : "%"} · concluída em ${fmtDate(a.completedAt)}</div></div></div>
+        <div class="mono" style="font-size:12px;color:var(--slate)">${a.score != null ? `Pontuação: ${a.score}${a.lessonType === "escrita" ? "/100" : "%"} · ` : ""}concluída em ${fmtDate(a.completedAt)}</div></div></div>
       ${a.feedback ? `<div style="background:var(--paper);border-radius:10px;padding:14px;font-size:13.5px;line-height:1.5;margin-bottom:${a.responseText ? "12px" : "0"}">${esc(a.feedback)}</div>` : ""}
       ${a.responseText ? `<div><span class="field-label">Texto do aluno</span><div style="margin-top:6px;background:#FAFAF7;border:1px solid var(--paper-dark);border-radius:10px;padding:14px;font-size:13.5px;line-height:1.6;white-space:pre-wrap">${esc(a.responseText)}</div></div>` : ""}
+    </div>`;
+  } else if (a.status === "aguardando_correcao") {
+    html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--paper-dark)">
+      <span class="field-label">Texto do aluno</span>
+      <div style="margin-top:6px;margin-bottom:16px;background:#FAFAF7;border:1px solid var(--paper-dark);border-radius:10px;padding:14px;font-size:13.5px;line-height:1.6;white-space:pre-wrap">${esc(a.responseText || "")}</div>
+      <div class="field"><span class="field-label">Nível atingido</span>
+        <select id="grade-level" class="input">
+          ${LEVELS_ORDER.map((l) => `<option value="${l}" ${l === a.lessonLevel ? "selected" : ""}>${l} — ${esc(LEVEL_NAMES[l])}</option>`).join("")}
+        </select></div>
+      <div class="field"><span class="field-label">Pontuação (0–100, opcional)</span><input id="grade-score" type="number" min="0" max="100" class="input" /></div>
+      <div class="field"><span class="field-label">Feedback para o aluno</span><textarea id="grade-feedback" class="input" style="min-height:100px" placeholder="Comentário construtivo sobre a redação…"></textarea></div>
+      ${state.formError ? `<p class="error-text">⚠ ${esc(state.formError)}</p>` : ""}
+      <button class="btn gold" data-action="submit-grade" data-id="${a.id}" ${state.busy ? "disabled" : ""}>${state.busy ? "Salvando…" : "Salvar correção"}</button>
     </div>`;
   } else {
     html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--paper-dark);font-size:13.5px;color:var(--slate)">Aguardando o aluno realizar esta atividade.</div>`;
   }
   return html;
 }
+Object.assign(actions, {
+  "submit-grade": async (ds) => {
+    const level = document.getElementById("grade-level").value;
+    const scoreRaw = document.getElementById("grade-score").value;
+    const feedback = document.getElementById("grade-feedback").value.trim();
+    state.busy = true; render();
+    try {
+      await db.collection("assignments").doc(ds.id).update({
+        status: "concluida", completedAt: todayISO(),
+        resultLevel: level, score: scoreRaw === "" ? null : Number(scoreRaw), feedback,
+      });
+      await loadAdminData();
+      state.busy = false; state.modal = null;
+      render();
+    } catch (err) { state.busy = false; state.formError = err.message; render(); }
+  },
+});
 
 /* ============================== STUDENT APP ============================== */
 function renderStudentApp() {
@@ -1537,8 +1648,8 @@ function renderStudentDashboard() {
 function renderPracticeLibrary() {
   const typeFilter = state.practiceTypeFilter || "todos";
   const levelFilter = state.practiceLevelFilter || (state.studentProfile.level || "todos");
-  const myCompleted = state.assignments.filter((a) => a.status === "concluida");
-  const bestFor = (lessonId) => myCompleted.filter((a) => a.lessonId === lessonId).sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""))[0];
+  const myAttempts = state.assignments.filter((a) => a.status === "concluida" || a.status === "aguardando_correcao");
+  const bestFor = (lessonId) => myAttempts.filter((a) => a.lessonId === lessonId).sort((a, b) => (b.completedAt || b.submittedAt || "").localeCompare(a.completedAt || a.submittedAt || ""))[0];
   const filtered = LESSON_BANK.filter((l) => (typeFilter === "todos" || l.type === typeFilter) && (levelFilter === "todos" || l.level === levelFilter));
 
   return `
@@ -1552,12 +1663,15 @@ function renderPracticeLibrary() {
     <div class="lesson-grid">
       ${filtered.map((l) => {
         const best = bestFor(l.id);
+        const badge = best && best.status === "aguardando_correcao"
+          ? `<span class="mono" style="font-size:11px;color:var(--gold)">Aguardando correção</span>`
+          : best ? `<span class="mono" style="font-size:11px;color:var(--sage)">Último: ${esc(best.resultLevel)}${best.score != null ? ` · ${best.score}${l.type === "escrita" ? "" : "%"}` : ""}</span>` : "";
         return `<div class="lesson-card">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">${typeTagHTML(l.type)}${pillHTML(l.level, LEVEL_VARS[l.level])}</div>
           <div style="font-weight:600;font-size:15px;margin-bottom:3px">${esc(l.title)}</div>
           <div style="font-size:12.5px;color:var(--slate);margin-bottom:14px">${esc(l.description)}</div>
           ${best ? `<div style="display:flex;align-items:center;justify-content:space-between">
-              <span class="mono" style="font-size:11px;color:var(--sage)">Último: ${esc(best.resultLevel)} · ${best.score}${l.type === "escrita" ? "" : "%"}</span>
+              ${badge}
               <button class="btn small ghost" data-action="start-lesson" data-lesson-id="${l.id}">Refazer</button></div>`
             : `<button class="btn small gold" data-action="start-lesson" data-lesson-id="${l.id}">Começar</button>`}
         </div>`;
@@ -1572,6 +1686,7 @@ Object.assign(actions, {
 function renderMyTasks() {
   const assignments = state.assignments.filter((a) => a.assignedBy === "professor");
   const pending = assignments.filter((a) => a.status === "pendente").sort((a, b) => (a.dueDate || a.assignedDate || "").localeCompare(b.dueDate || b.assignedDate || ""));
+  const awaiting = assignments.filter((a) => a.status === "aguardando_correcao").sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
   const done = assignments.filter((a) => a.status === "concluida").sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
   return `
     ${panel(`Pendentes (${pending.length})`, pending.length ? pending.map((a) => `
@@ -1579,6 +1694,9 @@ function renderMyTasks() {
         <div style="display:flex;align-items:center;gap:8px;margin-top:3px;flex-wrap:wrap">${typeTagHTML(a.lessonType)}${pillHTML(a.lessonLevel, LEVEL_VARS[a.lessonLevel])}${a.dueDate ? `<span class="mono" style="font-size:11px;color:var(--slate)">prazo ${fmtDate(a.dueDate)}</span>` : ""}</div></div>
         <button class="btn small gold" data-action="start-lesson" data-lesson-id="${a.lessonId}" data-assignment-id="${a.id}">Fazer agora</button></div>`).join("")
       : emptyState("Tudo em dia!", "Nenhuma tarefa pendente do seu professor no momento."))}
+    ${awaiting.length ? `<div style="margin-top:18px">${panel(`Aguardando correção do professor (${awaiting.length})`, awaiting.map((a) => `
+      <div class="row"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${esc(a.lessonTitle)}</div>${typeTagHTML(a.lessonType)}</div>
+      ${statusPill(a.status)}</div>`).join(""))}</div>` : ""}
     <div style="margin-top:18px">
       ${panel(`Concluídas (${done.length})`, done.length ? done.map((a) => `
         <div class="row"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">${esc(a.lessonTitle)}</div>${typeTagHTML(a.lessonType)}</div>
@@ -1635,35 +1753,33 @@ function renderExerciseRunner() {
     </div>`;
 }
 
-/* ---------- Writing runner ---------- */
+/* ---------- Writing runner (sem IA — revisão manual do professor) ---------- */
 function renderWritingRunner() {
   const ex = state.activeExercise;
   const lesson = ex.lesson;
-  if (ex.writingStatus === "done" && ex.outcome) {
+  if (ex.writingStatus === "sent") {
     return `<div class="panel anim" style="border:1.5px solid var(--gold);text-align:center;padding:26px">
-      <div style="display:flex;justify-content:center;margin-bottom:14px">${stampHTML(ex.outcome.level, "lg")}</div>
-      <h3 class="serif" style="font-size:21px;font-weight:600;margin:0 0 6px">Redação avaliada!</h3>
-      <p style="color:var(--slate);font-size:13.5px;margin-bottom:18px">Nível estimado do texto: <strong style="color:var(--ink)">${esc(ex.outcome.level)}</strong> · Pontuação: ${ex.outcome.score}/100</p>
-      <div style="background:var(--paper);border-radius:10px;padding:16px;text-align:left;font-size:13.5px;line-height:1.5;margin-bottom:18px">${esc(ex.outcome.feedback)}</div>
-      <button class="btn gold" data-action="writing-finish">Concluir</button>
+      <div style="display:flex;justify-content:center;margin-bottom:14px">${stampHTML(null, "lg")}</div>
+      <h3 class="serif" style="font-size:21px;font-weight:600;margin:0 0 6px">Redação enviada!</h3>
+      <p style="color:var(--slate);font-size:13.5px;margin-bottom:18px">Seu professor vai ler e avaliar. Você verá o resultado em <strong>Minhas tarefas</strong>.</p>
+      <button class="btn gold" data-action="writing-done">Concluir</button>
     </div>`;
   }
-  const grading = ex.writingStatus === "grading";
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div>${typeTagHTML(lesson.type)}<span class="mono" style="font-size:11px;color:var(--slate);margin-left:10px">${esc(lesson.title)} · Nível ${lesson.level}</span></div>
-      <button class="icon-btn" style="font-size:12.5px" data-action="cancel-exercise" ${grading ? "disabled" : ""}>Cancelar</button>
+      <button class="icon-btn" style="font-size:12.5px" data-action="cancel-exercise" ${state.busy ? "disabled" : ""}>Cancelar</button>
     </div>
     <div class="panel">
       <p class="serif" style="font-size:18px;font-weight:500;margin-bottom:16px;line-height:1.5">${esc(lesson.prompt)}</p>
-      <textarea id="writing-text" class="input" placeholder="Escreva sua resposta em inglês aqui…" style="min-height:220px" ${grading ? "disabled" : ""}>${esc(ex.writingText || "")}</textarea>
+      <textarea id="writing-text" class="input" placeholder="Escreva sua resposta em inglês aqui…" style="min-height:220px" ${state.busy ? "disabled" : ""}>${esc(ex.writingText || "")}</textarea>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
         <span class="mono small-muted">${lesson.minWords ? `mínimo recomendado: ${lesson.minWords} palavras` : ""}</span>
       </div>
     </div>
-    ${ex.writingStatus === "error" ? `<div class="notice error">Não foi possível avaliar sua redação agora. Seu texto não foi perdido — tente novamente.</div>` : ""}
-    <div style="display:flex;justify-content:flex-end;margin-top:20px">
-      <button class="btn gold" data-action="writing-submit" ${grading ? "disabled" : ""}>${grading ? "Avaliando…" : "Enviar para avaliação"}</button>
+    <p class="hint-text" style="margin-top:14px">Sua redação será enviada para o professor avaliar — não há correção automática.</p>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px">
+      <button class="btn gold" data-action="writing-submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Enviando…" : "Enviar para o professor"}</button>
     </div>`;
 }
 
@@ -1701,6 +1817,7 @@ function renderChart(canvas) {
 
 init();
 
+  
   </script>
 </body>
 </html>
